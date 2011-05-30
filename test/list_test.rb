@@ -334,7 +334,7 @@ class ListTest < Test::Unit::TestCase
     # the record.
     list = ListMixin.find(2)
     if list.respond_to?(:run_callbacks)
-      list.run_callbacks(:before_destroy)
+      list.run_callbacks(:destroy)
     else
       list.send(:callback, :before_destroy)
     end
@@ -534,7 +534,8 @@ class ArrayScopeListTest < Test::Unit::TestCase
 
   def test_injection
     item = ArrayScopeListMixin.new(:parent_id => 1, :parent_type => 'ParentClass')
-    assert_equal '"mixins"."parent_type" = \'ParentClass\' AND "mixins"."parent_id" = 1', item.scope_condition
+    assert (item.scope_condition == '"mixins"."parent_type" = \'ParentClass\' AND "mixins"."parent_id" = 1' or
+            item.scope_condition == '"mixins"."parent_id" = 1 AND "mixins"."parent_type" = \'ParentClass\'')
     assert_equal "pos", item.position_column
   end
 
