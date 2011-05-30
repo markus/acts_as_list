@@ -27,6 +27,7 @@ def teardown_db
 end
 
 class Mixin < ActiveRecord::Base
+  before_save { |r| raise 'should not trigger callbacks' unless r.new_record? }
 end
 
 class ListMixin < Mixin
