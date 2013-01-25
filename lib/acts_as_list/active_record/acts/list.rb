@@ -151,13 +151,13 @@ module ActiveRecord
         # Increase the position of this item without adjusting the rest of the list.
         def increment_position
           return unless in_list?
-          set_list_position(self.send(position_column).to_i + 1)
+          set_list_position(self.send(position_column).to_i + 1, false)
         end
 
         # Decrease the position of this item without adjusting the rest of the list.
         def decrement_position
           return unless in_list?
-          set_list_position(self.send(position_column).to_i - 1)
+          set_list_position(self.send(position_column).to_i - 1, false)
         end
 
         # Return +true+ if this object is the first in the list.
@@ -208,10 +208,13 @@ module ActiveRecord
         end
 
         # Sets the new position and saves it
-        def set_list_position(new_position)
+        def set_list_position(new_position, run_callbacks=true)
           send("#{position_column}=", new_position)
-          # just update the column, don't run validations and callbacks
-          acts_as_list_class.update_all({position_column => value}, :id => id) if id
+          if run_callbacks
+            save!
+          else
+            acts_as_list_class.update_all({position_column => new_position}, :id => id) if id
+          end
         end
 
         private
@@ -247,12 +250,12 @@ module ActiveRecord
 
           # Forces item to assume the bottom position in the list.
           def assume_bottom_position
-            set_list_position(bottom_position_in_list(self).to_i + 1)
+            set_list_position(bottom_position_in_list(self).to_i + 1, false)
           end
 
           # Forces item to assume the top position in the list.
           def assume_top_position
-            set_list_position(acts_as_list_top)
+            set_list_position(acts_as_list_top, false)
           end
 
           # This has the effect of moving all the higher items up one.
