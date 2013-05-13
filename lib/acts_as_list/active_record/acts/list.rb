@@ -211,7 +211,7 @@ module ActiveRecord
         def set_list_position(new_position, run_callbacks=true)
           send("#{position_column}=", new_position)
           if run_callbacks
-            save!
+            save(:validate => false)
           else
             acts_as_list_class.update_all({position_column => new_position}, :id => id) if id
           end
