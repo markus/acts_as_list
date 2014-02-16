@@ -12,12 +12,12 @@ module ActiveRecord
       # Todo list example:
       #
       #   class TodoList < ActiveRecord::Base
-      #     has_many :todo_items, :order => "position"
+      #     has_many :todo_items, order: "position"
       #   end
       #
       #   class TodoItem < ActiveRecord::Base
       #     belongs_to :todo_list
-      #     acts_as_list :scope => :todo_list
+      #     acts_as_list scope: :todo_list
       #   end
       #
       #   todo_list.first.move_to_bottom
@@ -29,33 +29,51 @@ module ActiveRecord
         # * +scope+ - restricts what is to be considered a list. Given a symbol, it'll attach <tt>_id</tt>
         #   (if it hasn't already been added) and use that as the foreign key restriction. It's also possible
         #   to give it an entire string that is interpolated if you need a tighter scope than just a foreign key.
-        #   Example: <tt>acts_as_list :scope => 'todo_list_id = #{todo_list_id} AND completed = 0'</tt>
+        #   Example: <tt>acts_as_list scope: 'todo_list_id = #{todo_list_id} AND completed = 0'</tt>
         # * +top_of_list+ - defines the integer used for the top of the list. Defaults to 1. Use 0 to make the collection
         #   act more like an array in its indexing.
         # * +add_new_at+ - specifies whether objects get added to the :top or :bottom of the list. (default: +bottom+)
+        #                   `nil` will result in new items not being added to the list on create
         def acts_as_list(options = {})
-          configuration = { :column => "position", :scope => "1 = 1", :top_of_list => 1, :add_new_at => :bottom}
+          configuration = { column: "position", scope: "1 = 1", top_of_list: 1, add_new_at: :bottom}
           configuration.update(options) if options.is_a?(Hash)
 
           configuration[:scope] = "#{configuration[:scope]}_id".intern if configuration[:scope].is_a?(Symbol) && configuration[:scope].to_s !~ /_id$/
 
           if configuration[:scope].is_a?(Symbol)
-            scope_condition_method = %(
+            scope_methods = %(
               def scope_condition
                 self.class.send(:sanitize_sql_hash_for_conditions, { :#{configuration[:scope].to_s} => send(:#{configuration[:scope].to_s}) })
               end
+
+              def scope_changed?
+                changes.include?(scope_name.to_s)
+              end
             )
           elsif configuration[:scope].is_a?(Array)
-            scope_condition_method = %(
-              def scope_condition
-                attrs = %w(#{configuration[:scope].join(" ")}).inject({}) do |memo,column|
+            scope_methods = %(
+              def attrs
+                %w(#{configuration[:scope].join(" ")}).inject({}) do |memo,column|
                   memo[column.intern] = send(column.intern); memo
                 end
+              end
+
+              def scope_changed?
+                (attrs.keys & changes.keys.map(&:to_sym)).any?
+              end
+
+              def scope_condition
                 self.class.send(:sanitize_sql_hash_for_conditions, attrs)
               end
             )
           else
-            scope_condition_method = "def scope_condition() \"#{configuration[:scope]}\" end"
+            scope_methods = %(
+              def scope_condition
+                "#{configuration[:scope]}"
+              end
+
+              def scope_changed?() false end
+            )
           end
 
           class_eval <<-EOV
@@ -73,20 +91,35 @@ module ActiveRecord
               '#{configuration[:column]}'
             end
 
-            #{scope_condition_method}
+            def scope_name
+              '#{configuration[:scope]}'
+            end
+
+            def add_new_at
+              '#{configuration[:add_new_at]}'
+            end
+
+            #{scope_methods}
 
             # only add to attr_accessible
             # if the class has some mass_assignment_protection
 
-            unless accessible_attributes.blank?
+            if defined?(accessible_attributes) and !accessible_attributes.blank?
               attr_accessible :#{configuration[:column]}
             end
 
             before_destroy :reload_position
             after_destroy :decrement_positions_on_lower_items
-            before_create :add_to_list_#{configuration[:add_new_at]}
+            before_update :check_scope
             after_update :update_positions
+
+            scope :in_list, lambda { where("#{table_name}.#{configuration[:column]} IS NOT NULL") }
           EOV
+
+          if configuration[:add_new_at].present?
+            self.send(:before_create, "add_to_list_#{configuration[:add_new_at]}")
+          end
+
         end
       end
 
@@ -148,6 +181,12 @@ module ActiveRecord
           end
         end
 
+        # Move the item within scope
+        def move_within_scope(scope_id)
+          send("#{scope_name}=", scope_id)
+          save!
+        end
+
         # Increase the position of this item without adjusting the rest of the list.
         def increment_position
           return unless in_list?
@@ -175,19 +214,41 @@ module ActiveRecord
         # Return the next higher item in the list.
         def higher_item
           return nil unless in_list?
-          acts_as_list_class.unscoped.find(:first, :conditions =>
-            "#{scope_condition} AND #{position_column} < #{(send(position_column).to_i).to_s}",
-            :order => "#{acts_as_list_class.table_name}.#{position_column} DESC"
-          )
+          acts_as_list_class.unscoped.
+            where("#{scope_condition} AND #{position_column} < #{(send(position_column).to_i).to_s}").
+            order("#{acts_as_list_class.table_name}.#{position_column} DESC").first
+        end
+
+        # Return the next n higher items in the list
+        # selects all higher items by default
+        def higher_items(limit=nil)
+          limit ||= acts_as_list_list.count
+          position_value = send(position_column)
+          acts_as_list_list.
+            where("#{position_column} < ?", position_value).
+            where("#{position_column} >= ?", position_value - limit).
+            limit(limit).
+            order("#{acts_as_list_class.table_name}.#{position_column} ASC")
         end
 
         # Return the next lower item in the list.
         def lower_item
           return nil unless in_list?
-          acts_as_list_class.unscoped.find(:first, :conditions =>
-            "#{scope_condition} AND #{position_column} > #{(send(position_column).to_i).to_s}",
-            :order => "#{acts_as_list_class.table_name}.#{position_column} ASC"
-          )
+          acts_as_list_class.unscoped.
+            where("#{scope_condition} AND #{position_column} > #{(send(position_column).to_i).to_s}").
+            order("#{acts_as_list_class.table_name}.#{position_column} ASC").first
+        end
+
+        # Return the next n lower items in the list
+        # selects all lower items by default
+        def lower_items(limit=nil)
+          limit ||= acts_as_list_list.count
+          position_value = send(position_column)
+          acts_as_list_list.
+            where("#{position_column} > ?", position_value).
+            where("#{position_column} <= ?", position_value + limit).
+            limit(limit).
+            order("#{acts_as_list_class.table_name}.#{position_column} ASC")
         end
 
         # Test if this record is in a list
@@ -218,6 +279,11 @@ module ActiveRecord
         end
 
         private
+          def acts_as_list_list
+            acts_as_list_class.unscoped.
+              where(scope_condition)
+          end
+
           def add_to_list_top
             increment_positions_on_all_items
             self[position_column] = acts_as_list_top
@@ -244,8 +310,8 @@ module ActiveRecord
           # Returns the bottom item
           def bottom_item(except = nil)
             conditions = scope_condition
-            conditions = "#{conditions} AND #{self.class.primary_key} != #{except.id}" if except
-            acts_as_list_class.unscoped.where(conditions).order("#{acts_as_list_class.table_name}.#{position_column} DESC").first
+            conditions = "#{conditions} AND #{self.class.primary_key} != '#{except.id}'" if except
+            acts_as_list_class.unscoped.in_list.where(conditions).order("#{acts_as_list_class.table_name}.#{position_column} DESC").first
           end
 
           # Forces item to assume the bottom position in the list.
@@ -260,8 +326,10 @@ module ActiveRecord
 
           # This has the effect of moving all the higher items up one.
           def decrement_positions_on_higher_items(position)
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} <= #{position}"
+            acts_as_list_class.unscoped.where(
+              "#{scope_condition} AND #{position_column} <= #{position}"
+            ).update_all(
+              "#{position_column} = (#{position_column} - 1)"
             )
           end
 
@@ -269,52 +337,64 @@ module ActiveRecord
           def decrement_positions_on_lower_items(position=nil)
             return unless in_list?
             position ||= send(position_column).to_i
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{position}"
+            acts_as_list_class.unscoped.where(
+              "#{scope_condition} AND #{position_column} > #{position}"
+            ).update_all(
+              "#{position_column} = (#{position_column} - 1)"
             )
           end
 
           # This has the effect of moving all the higher items down one.
           def increment_positions_on_higher_items
             return unless in_list?
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} < #{send(position_column).to_i}"
+            acts_as_list_class.unscoped.where(
+              "#{scope_condition} AND #{position_column} < #{send(position_column).to_i}"
+            ).update_all(
+              "#{position_column} = (#{position_column} + 1)"
             )
           end
 
           # This has the effect of moving all the lower items down one.
           def increment_positions_on_lower_items(position)
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{position}"
-           )
+            acts_as_list_class.unscoped.where(
+              "#{scope_condition} AND #{position_column} >= #{position}"
+            ).update_all(
+              "#{position_column} = (#{position_column} + 1)"
+            )
           end
 
           # Increments position (<tt>position_column</tt>) of all items in the list.
           def increment_positions_on_all_items
-            acts_as_list_class.unscoped.update_all(
-              "#{position_column} = (#{position_column} + 1)",  "#{scope_condition}"
+            acts_as_list_class.unscoped.where(
+              "#{scope_condition}"
+            ).update_all(
+              "#{position_column} = (#{position_column} + 1)"
             )
           end
 
           # Reorders intermediate items to support moving an item from old_position to new_position.
           def shuffle_positions_on_intermediate_items(old_position, new_position, avoid_id = nil)
             return if old_position == new_position
-            avoid_id_condition = avoid_id ? " AND #{self.class.primary_key} != #{avoid_id}" : ''
+            avoid_id_condition = avoid_id ? " AND #{self.class.primary_key} != '#{avoid_id}'" : ''
             if old_position < new_position
               # Decrement position of intermediate items
               #
               # e.g., if moving an item from 2 to 5,
               # move [3, 4, 5] to [2, 3, 4]
-              acts_as_list_class.unscoped.update_all(
-                "#{position_column} = (#{position_column} - 1)", "#{scope_condition} AND #{position_column} > #{old_position} AND #{position_column} <= #{new_position}#{avoid_id_condition}"
+              acts_as_list_class.unscoped.where(
+                "#{scope_condition} AND #{position_column} > #{old_position} AND #{position_column} <= #{new_position}#{avoid_id_condition}"
+              ).update_all(
+                "#{position_column} = (#{position_column} - 1)"
               )
             else
               # Increment position of intermediate items
               #
               # e.g., if moving an item from 5 to 2,
               # move [2, 3, 4] to [3, 4, 5]
-              acts_as_list_class.unscoped.update_all(
-                "#{position_column} = (#{position_column} + 1)", "#{scope_condition} AND #{position_column} >= #{new_position} AND #{position_column} < #{old_position}#{avoid_id_condition}"
+              acts_as_list_class.unscoped.where(
+                "#{scope_condition} AND #{position_column} >= #{new_position} AND #{position_column} < #{old_position}#{avoid_id_condition}"
+              ).update_all(
+                "#{position_column} = (#{position_column} + 1)"
               )
             end
           end
@@ -342,8 +422,24 @@ module ActiveRecord
           def update_positions
             old_position = send("#{position_column}_was").to_i
             new_position = send(position_column).to_i
+
             return unless acts_as_list_class.unscoped.where("#{scope_condition} AND #{position_column} = #{new_position}").count > 1
             shuffle_positions_on_intermediate_items old_position, new_position, id
+          end
+
+          # Temporarily swap changes attributes with current attributes
+          def swap_changed_attributes
+            @changed_attributes.each { |k, _| @changed_attributes[k], self[k] =
+              self[k], @changed_attributes[k] }
+          end
+
+          def check_scope
+            if scope_changed?
+              swap_changed_attributes
+              send('decrement_positions_on_lower_items') if lower_item
+              swap_changed_attributes
+              send("add_to_list_#{add_new_at}")
+            end
           end
 
           def reload_position

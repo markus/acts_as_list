@@ -1,4 +1,4 @@
-source "http://rubygems.org"
+source "https://rubygems.org"
 
 gem 'sqlite3', :platforms => [:ruby]
 gem 'activerecord-jdbcsqlite3-adapter', :platforms => [:jruby]
@@ -9,7 +9,10 @@ platforms :rbx do
   gem 'rubysl-test-unit'
 end
 
-# Specify your gem's dependencies in acts_as_list-rails3.gemspec
-gemspec
+
+gem 'activerecord', '>= 4.0.0', '< 5'
+
+# Specify your gem's dependencies in acts_as_list.gemspec
+gemspec :path => File.join('..', '..')
 
 gem 'rake'
