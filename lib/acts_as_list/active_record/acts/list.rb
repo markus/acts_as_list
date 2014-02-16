@@ -274,7 +274,7 @@ module ActiveRecord
           if run_callbacks
             save(:validate => false)
           else
-            acts_as_list_class.update_all({position_column => new_position}, :id => id) if id
+            update_column(position_column, new_position) if id
           end
         end
 
